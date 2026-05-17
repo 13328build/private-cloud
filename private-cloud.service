@@ -1,0 +1,18 @@
+[Unit]
+Description=Private Cloud Storage
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node /root/.openclaw/workspace/private-cloud/server.js
+WorkingDirectory=/root/.openclaw/workspace/private-cloud
+Environment=PORT=9800
+Environment=CLOUD_PASSWORD=changeme
+Environment=STORAGE_DIR=/root/cloud-storage
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -881,13 +881,13 @@ async function refreshList() {
 function renderBreadcrumb() {
   const bc = document.getElementById('breadcrumb');
   const parts = currentPath.split('/').filter(Boolean);
-  let html = '<span onclick="navigateTo(\'/\')" ' + (parts.length === 0 ? 'class="active"' : '') + '>🏠 根目录</span>';
+  let html = '<span onclick="navigateTo(\\'/\\')" ' + (parts.length === 0 ? 'class="active"' : '') + '>🏠 根目录</span>';
   let pathAcc = '';
   parts.forEach((p, i) => {
     pathAcc += '/' + p;
     const isLast = i === parts.length - 1;
     html += '<span class="sep">/</span>';
-    html += '<span onclick="navigateTo(\'' + pathAcc.replace(/'/g, "\\'") + '\')" ' +
+    html += '<span onclick="navigateTo(\\'' + pathAcc.replace(/'/g, "\\\'") + '\\')" ' +
             (isLast ? 'class="active"' : '') + '>' + escHtml(p) + '</span>';
   });
   bc.innerHTML = html;
@@ -916,10 +916,10 @@ function renderFiles(items) {
     const size = item.isDir ? '' : formatSize(item.size);
     const date = new Date(item.mtime).toLocaleDateString('zh-CN', {month:'short',day:'numeric'});
     return '<div class="file-item" onclick="' + (item.isDir ?
-      'navigateTo(\'' + (currentPath === '/' ? '' : currentPath) + '/' + item.name.replace(/'/g, "\\'") + '\')' :
-      'downloadFile(\'' + (currentPath === '/' ? '' : currentPath) + '/' + item.name.replace(/'/g, "\\'") + '\', \'' + item.name.replace(/'/g, "\\'") + '\')') +
-      ')" oncontextmenu="showCtxMenu(event, \'' + item.name.replace(/'/g, "\\'") + '\', ' + item.isDir + ')" ' +
-      'ontouchstart="startLongPress(event, \'' + item.name.replace(/'/g, "\\'") + '\', ' + item.isDir + ')" ' +
+      'navigateTo(\\'' + (currentPath === '/' ? '' : currentPath) + '/' + item.name.replace(/'/g, "\\\'") + '\\')' :
+      'downloadFile(\\'' + (currentPath === '/' ? '' : currentPath) + '/' + item.name.replace(/'/g, "\\\'") + '\\', \\'' + item.name.replace(/'/g, "\\\'") + '\\')') +
+      ')" oncontextmenu="showCtxMenu(event, \\'' + item.name.replace(/'/g, "\\\'") + '\\', ' + item.isDir + ')" ' +
+      'ontouchstart="startLongPress(event, \\'' + item.name.replace(/'/g, "\\\'") + '\\', ' + item.isDir + ')" ' +
       'ontouchend="cancelLongPress()" ontouchmove="cancelLongPress()">' +
       '<div class="file-icon">' + icon + '</div>' +
       '<div class="file-info">' +
@@ -927,8 +927,8 @@ function renderFiles(items) {
         '<div class="file-meta">' + (size ? size + ' · ' : '') + date + '</div>' +
       '</div>' +
       '<div class="file-actions">' +
-        (!item.isDir ? '<button onclick="event.stopPropagation();downloadFile(\'' + (currentPath === '/' ? '' : currentPath) + '/' + item.name.replace(/'/g, "\\'") + '\', \'' + item.name.replace(/'/g, "\\'") + '\')">⬇️</button>' : '') +
-        '<button class="danger" onclick="event.stopPropagation();deleteItem(\'' + (currentPath === '/' ? '' : currentPath) + '/' + item.name.replace(/'/g, "\\'") + '\')">🗑️</button>' +
+        (!item.isDir ? '<button onclick="event.stopPropagation();downloadFile(\\'' + (currentPath === '/' ? '' : currentPath) + '/' + item.name.replace(/'/g, "\\\'") + '\\', \\'' + item.name.replace(/'/g, "\\\'") + '\\')">⬇️</button>' : '') +
+        '<button class="danger" onclick="event.stopPropagation();deleteItem(\\'' + (currentPath === '/' ? '' : currentPath) + '/' + item.name.replace(/'/g, "\\\'") + '\\')">🗑️</button>' +
       '</div>' +
     '</div>';
   }).join('');
@@ -1158,25 +1158,38 @@ async function simpleUpload(file, itemId) {
 }
 
 async function chunkedUpload(file, itemId) {
-  const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB 每片（更稳定）
+  const CHUNK_SIZE = 4 * 1024 * 1024; // 4MB 每片
   const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-  const uploadId = crypto.randomUUID();
+  const uploadId = (crypto.randomUUID && crypto.randomUUID()) || Date.now().toString(36) + '_' + Math.random().toString(36).slice(2);
   const bar = document.getElementById(itemId + '_bar');
+  const MAX_RETRIES = 3;
 
   for (let i = 0; i < totalChunks; i++) {
     const start = i * CHUNK_SIZE;
     const end = Math.min(start + CHUNK_SIZE, file.size);
     const chunk = file.slice(start, end);
 
-    const resp = await fetch('/api/upload?chunk=' + i + '&chunks=' + totalChunks +
-      '&uploadId=' + uploadId + '&filename=' + encodeURIComponent(file.name) +
-      '&dir=' + encodeURIComponent(currentPath), {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: chunk
-    });
+    let success = false;
+    for (let retry = 0; retry < MAX_RETRIES && !success; retry++) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000);
+        const resp = await fetch('/api/upload?chunk=' + i + '&chunks=' + totalChunks +
+          '&uploadId=' + uploadId + '&filename=' + encodeURIComponent(file.name) +
+          '&dir=' + encodeURIComponent(currentPath), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: chunk,
+          signal: controller.signal
+        });
+        clearTimeout(timeout);
+        if (resp.ok) { success = true; }
+      } catch(e) {
+        if (retry === MAX_RETRIES - 1) throw e;
+      }
+    }
 
-    if (!resp.ok) throw new Error('分片上传失败');
+    if (!success) throw new Error('分片上传失败');
 
     const pct = Math.round((i + 1) / totalChunks * 100);
     bar.style.width = pct + '%';

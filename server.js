@@ -247,13 +247,11 @@ function handleChunkedUpload(req, res, opts) {
   const { fileName, chunkIndex, totalChunks, uploadId, targetDir } = opts;
   const chunkPath = path.join(CONFIG.chunkDir, `${uploadId}_${chunkIndex}`);
 
-  // 接收分片
-  const chunks = [];
-  req.on('data', d => chunks.push(d));
-  req.on('end', () => {
-    const buf = Buffer.concat(chunks);
-    fs.writeFileSync(chunkPath, buf);
+  // 流式写入磁盘，不在内存缓冲
+  const writeStream = fs.createWriteStream(chunkPath);
+  req.pipe(writeStream);
 
+  writeStream.on('finish', () => {
     // 检查所有分片是否完成
     let completed = 0;
     for (let i = 0; i < totalChunks; i++) {
@@ -261,7 +259,7 @@ function handleChunkedUpload(req, res, opts) {
     }
 
     if (completed === totalChunks) {
-      // 合并分片
+      // 合并分片（流式，不一次读入内存）
       const safeName = fileName.replace(/[/\\?%*:|"<>]/g, '_');
       let finalPath = path.join(targetDir, safeName);
       let counter = 1;
@@ -272,17 +270,15 @@ function handleChunkedUpload(req, res, opts) {
         counter++;
       }
 
-      const writeStream = fs.createWriteStream(finalPath);
-      for (let i = 0; i < totalChunks; i++) {
-        const cp = path.join(CONFIG.chunkDir, `${uploadId}_${i}`);
-        writeStream.write(fs.readFileSync(cp));
-        fs.unlinkSync(cp);
-      }
-      writeStream.end();
-
-      writeStream.on('finish', () => {
+      mergeChunks(totalChunks, uploadId, finalPath, (err) => {
+        if (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: '合并失败: ' + err.message }));
+          return;
+        }
+        const stat = fs.statSync(finalPath);
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, file: path.basename(finalPath), merged: true }));
+        res.end(JSON.stringify({ ok: true, file: path.basename(finalPath), size: stat.size, merged: true }));
       });
     } else {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -290,11 +286,43 @@ function handleChunkedUpload(req, res, opts) {
     }
   });
 
-  req.on('error', () => {
+  writeStream.on('error', (err) => {
     try { fs.unlinkSync(chunkPath); } catch {}
     res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: '上传失败' }));
+    res.end(JSON.stringify({ error: '上传失败: ' + err.message }));
   });
+
+  req.on('error', () => {
+    try { writeStream.destroy(); fs.unlinkSync(chunkPath); } catch {}
+  });
+}
+
+// 流式合并分片，不一次性加载到内存
+function mergeChunks(totalChunks, uploadId, finalPath, callback) {
+  const writeStream = fs.createWriteStream(finalPath);
+  let current = 0;
+
+  function writeNext() {
+    if (current >= totalChunks) {
+      writeStream.end();
+      return;
+    }
+    const cp = path.join(CONFIG.chunkDir, `${uploadId}_${current}`);
+    const readStream = fs.createReadStream(cp);
+    readStream.pipe(writeStream, { end: false });
+    readStream.on('end', () => {
+      try { fs.unlinkSync(cp); } catch {}
+      current++;
+      writeNext();
+    });
+    readStream.on('error', (err) => {
+      callback(err);
+    });
+  }
+
+  writeStream.on('finish', () => callback(null));
+  writeStream.on('error', (err) => callback(err));
+  writeNext();
 }
 
 // ========== API 处理 ==========
@@ -1093,8 +1121,8 @@ async function processUploadQueue() {
   '<div class="progress-bar"><div class="fill" id="' + itemId + '_bar" style="width:0%"></div></div>';
 
   try {
-    if (file.size > 10 * 1024 * 1024) {
-      // 大文件分片上传
+    if (file.size > 5 * 1024 * 1024) {
+      // 大于 5MB 分片上传（每片 2MB，更稳定）
       await chunkedUpload(file, itemId);
     } else {
       // 小文件直接上传
@@ -1130,7 +1158,7 @@ async function simpleUpload(file, itemId) {
 }
 
 async function chunkedUpload(file, itemId) {
-  const CHUNK_SIZE = 4 * 1024 * 1024; // 4MB
+  const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB 每片（更稳定）
   const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
   const uploadId = crypto.randomUUID();
   const bar = document.getElementById(itemId + '_bar');
